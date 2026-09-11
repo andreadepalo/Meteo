@@ -120,6 +120,15 @@ body::before{content:'';position:fixed;inset:0;z-index:-1;pointer-events:none;
 .rainsum{font-size:13.5px;color:var(--tx2);line-height:1.45}
 .rainsum b{color:var(--tx)}
 
+/* ---------- nowcast 15 minuti ---------- */
+.m15{display:flex;gap:4px;align-items:flex-end;margin-bottom:10px}
+.m15b{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;justify-content:flex-end}
+.m15b .v{font-size:9px;color:var(--tx2);height:11px;font-variant-numeric:tabular-nums}
+.m15b .b{width:100%;border-radius:4px 4px 2px 2px;background:linear-gradient(180deg,var(--rain),#2c6fc4)}
+.m15b .b.z{background:rgba(255,255,255,.07)}
+.m15b .h{font-size:8.5px;color:var(--tx3);font-variant-numeric:tabular-nums;
+  writing-mode:vertical-rl;text-orientation:mixed;height:34px}
+
 /* ---------- striscia ora per ora ---------- */
 .strip{display:flex;gap:2px;overflow-x:auto;margin:0 -16px;padding:2px 16px 6px;
   scroll-snap-type:x proximity;scrollbar-width:none;-webkit-overflow-scrolling:touch}
@@ -175,9 +184,15 @@ body::before{content:'';position:fixed;inset:0;z-index:-1;pointer-events:none;
 .day .dn small{display:block;color:var(--tx3);font-size:11px;font-weight:400}
 .day .ic{font-size:20px;text-align:center}
 .day .mid{min-width:0}
-.day .bar{height:5px;border-radius:4px;background:rgba(255,255,255,.08);position:relative;overflow:hidden}
+.day .bar{height:7px;border-radius:4px;background:rgba(255,255,255,.07);position:relative;overflow:hidden}
 .day .bar i{position:absolute;top:0;bottom:0;border-radius:4px;
   background:linear-gradient(90deg,var(--cold),var(--warm),var(--hot))}
+/* coda chiara = estremi delle simulazioni, parte piena = dove sta il grosso */
+.day .bar u{position:absolute;top:2px;bottom:2px;border-radius:3px;
+  background:linear-gradient(90deg,var(--cold),var(--warm),var(--hot));opacity:.22}
+.day.trend{grid-template-columns:54px 28px 1fr 74px;cursor:default}
+.day.trend .tt{font-size:12.5px}
+.day .tt .fascia{color:var(--tx);font-weight:600;letter-spacing:-.2px}
 .day .rain{font-size:11px;color:var(--rain);margin-top:5px;height:14px;font-variant-numeric:tabular-nums;
   display:flex;align-items:center;gap:7px;overflow:hidden;white-space:nowrap}
 .cdot{display:inline-flex;align-items:center;gap:4px;font-size:10.5px;font-weight:650;flex:0 0 auto}
@@ -325,8 +340,18 @@ const MODELS = [
   {id:'dmi_seamless',               n:'DMI',          d:'Danimarca',                   f:'🇩🇰', def:0}
 ];
 
+/* Modelli ENSEMBLE: lo stesso modello girato decine di volte con partenze
+   leggermente diverse. Danno probabilità misurate, non stimate. */
+const ENS_MODELS = [
+  {id:'ecmwf_ifs025',        n:'ECMWF',   att:51},
+  {id:'icon_seamless_eps',   n:'ICON',    att:40},
+  {id:'gfs_ensemble_seamless', n:'GFS',   att:31}
+];
+
 const API   = 'https://api.open-meteo.com/v1/forecast';
+const ENS   = 'https://ensemble-api.open-meteo.com/v1/ensemble';
 const GEO   = 'https://geocoding-api.open-meteo.com/v1/search';
+const GIORNI = 14;
 const LS     = {places:'mc_places', active:'mc_active', models:'mc_models', cache:'mc_cache', mit:'mc_meteoit'};
 
 /* WMO weather codes → italiano */
@@ -374,6 +399,7 @@ let DATA = null, busy = false;
 const CUR = 'temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,is_day,surface_pressure';
 const HRY = 'temperature_2m,precipitation,precipitation_probability,weather_code,is_day,cloud_cover,wind_speed_10m,wind_gusts_10m';
 const DLY = 'weather_code,temperature_2m_max,temperature_2m_min,apparent_temperature_max,apparent_temperature_min,precipitation_sum,precipitation_probability_max,snowfall_sum,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant,uv_index_max,sunrise,sunset,daylight_duration,sunshine_duration';
+const MIN15 = 'precipitation,weather_code,temperature_2m';
 /* set ridotto: variabili che praticamente ogni modello fornisce */
 const M_CUR = 'temperature_2m,precipitation,weather_code,wind_speed_10m,wind_gusts_10m';
 const M_HRY = 'temperature_2m,precipitation';
@@ -381,11 +407,20 @@ const M_DLY = 'weather_code,temperature_2m_max,temperature_2m_min,precipitation_
 
 function url(p, opts){
   const q = new URLSearchParams({
-    latitude:p.lat, longitude:p.lon, timezone:'auto', forecast_days:'7',
+    latitude:p.lat, longitude:p.lon, timezone:'auto',
+    forecast_days: String(opts.days || 7),
     current:opts.cur, hourly:opts.hry, daily:opts.dly, wind_speed_unit:'kmh'
   });
+  if(opts.min15) q.set('minutely_15', opts.min15);
   if(opts.model) q.set('models', opts.model);
   return API + '?' + q.toString();
+}
+
+function ensUrl(p, model){
+  return ENS + '?' + new URLSearchParams({
+    latitude:p.lat, longitude:p.lon, timezone:'auto',
+    forecast_days:String(GIORNI), hourly:'temperature_2m,precipitation'
+  }) + '&models=' + model;
 }
 
 async function jget(u, ms=14000){
@@ -398,8 +433,16 @@ async function jget(u, ms=14000){
   } finally { clearTimeout(t); }
 }
 
+/* Le probabilità arrivano dopo: sono il pezzo più pesante da scaricare,
+   e non voglio che la schermata resti bianca ad aspettarle. */
+function loadEnsemble(p){
+  return Promise.all(ENS_MODELS.map(m =>
+    jget(ensUrl(p, m.id), 22000).then(j => ({id:m.id, n:m.n, j})).catch(()=> null)
+  )).then(list => list.filter(e => e && e.j && e.j.hourly && Array.isArray(e.j.hourly.time)));
+}
+
 async function loadAll(p){
-  const base = jget(url(p,{cur:CUR,hry:HRY,dly:DLY}));
+  const base = jget(url(p,{cur:CUR,hry:HRY,dly:DLY,min15:MIN15,days:GIORNI}));
   const mods = picked.map(id =>
     jget(url(p,{cur:M_CUR,hry:M_HRY,dly:M_DLY,model:id}))
       .then(j => ({id, j}))
@@ -420,6 +463,100 @@ async function loadAll(p){
 /* =========================================================
    CONSENSO
    ========================================================= */
+/* =========================================================
+   ENSEMBLE — probabilità misurate
+   Ogni modello viene girato decine di volte con partenze leggermente
+   diverse. Qui leggo i singoli membri e ne ricavo percentili e
+   probabilità vere, invece del punteggio di accordo stimato a mano.
+   ========================================================= */
+
+/* I nomi delle serie dei membri possono cambiare (con o senza zero
+   davanti, con o senza la corsa di controllo senza suffisso): li prendo
+   tutti per forma invece di darli per scontati. */
+function memberSeries(block, varName){
+  const re = new RegExp('^' + varName + '(?:_member\\d+)?$');
+  return Object.keys(block)
+    .filter(k => re.test(k) && Array.isArray(block[k]))
+    .map(k => block[k]);
+}
+
+function pct(arr, q){
+  if(!arr || !arr.length) return null;
+  const a = [...arr].sort((x,y)=>x-y);
+  const i = (a.length-1)*q, lo = Math.floor(i), hi = Math.ceil(i);
+  return lo === hi ? a[lo] : a[lo] + (a[hi]-a[lo])*(i-lo);
+}
+
+/* Aggrego ogni membro per giorno locale: massima, minima, pioggia totale.
+   Le stringhe orarie arrivano già in ora locale, quindi i primi 10
+   caratteri sono la data del posto. */
+function ensembleStats(ENSL){
+  const day = new Map();   // data -> {tmax:[], tmin:[], prec:[]}
+  const hour = new Map();  // ora  -> {wet:0, tot:0, mm:[]}
+  let membri = 0;
+
+  for(const e of ENSL){
+    const h = e.j.hourly;
+    const T = memberSeries(h,'temperature_2m');
+    const P = memberSeries(h,'precipitation');
+    const n = Math.max(T.length, P.length);
+    membri += n;
+
+    for(let m=0; m<n; m++){
+      const tm = T[m], pm = P[m];
+      const acc = new Map();
+      for(let i=0; i<h.time.length; i++){
+        const t = h.time[i], d = t.slice(0,10);
+        let a = acc.get(d);
+        if(!a){ a = {tmax:-1e9, tmin:1e9, prec:0, ore:0}; acc.set(d,a); }
+        const tv = tm ? num(tm[i]) : null;
+        const pv = pm ? num(pm[i]) : null;
+        if(tv !== null){ a.tmax = Math.max(a.tmax,tv); a.tmin = Math.min(a.tmin,tv); a.ore++; }
+        if(pv !== null){ a.prec += pv; }
+        if(pv !== null){
+          let hh = hour.get(t);
+          if(!hh){ hh = {wet:0, tot:0, mm:[]}; hour.set(t,hh); }
+          hh.tot++; if(pv >= 0.1) hh.wet++; hh.mm.push(pv);
+        }
+      }
+      for(const [d,a] of acc){
+        /* giorni tagliati a metà dalla fine della corsa: li scarto */
+        if(a.ore < 20) continue;
+        let s = day.get(d);
+        if(!s){ s = {tmax:[], tmin:[], prec:[]}; day.set(d,s); }
+        s.tmax.push(a.tmax); s.tmin.push(a.tmin); s.prec.push(a.prec);
+      }
+    }
+  }
+  return {day, hour, membri};
+}
+
+/* statistiche di un singolo giorno a partire dai membri */
+function ensDay(E, dateStr){
+  const s = E && E.day.get(dateStr);
+  if(!s || !s.tmax.length) return null;
+  const n = s.tmax.length;
+  const sogliaPioggia = v => s.prec.filter(x => x >= v).length / s.prec.length;
+  return {
+    n,
+    tmaxP10:pct(s.tmax,.10), tmaxP50:pct(s.tmax,.50), tmaxP90:pct(s.tmax,.90),
+    tminP10:pct(s.tmin,.10), tminP50:pct(s.tmin,.50), tminP90:pct(s.tmin,.90),
+    precP50:pct(s.prec,.50), precP90:pct(s.prec,.90),
+    pPioggia: Math.round(sogliaPioggia(0.5)*100),
+    pForte:   Math.round(sogliaPioggia(10)*100),
+    banda: pct(s.tmax,.90) - pct(s.tmax,.10)
+  };
+}
+
+/* affidabilità dalla larghezza della banda: questa non è inventata,
+   è la dispersione vera fra le simulazioni */
+function affidabilita(banda){
+  if(banda == null) return null;
+  if(banda <= 2.5) return {c:'a', t:'Alta'};
+  if(banda <= 5)   return {c:'b', t:'Media'};
+  return {c:'c', t:'Bassa'};
+}
+
 /* codice meteo più frequente tra i modelli; a parità vince il più "severo" */
 function modeOf(arr){
   if(!arr.length) return null;
@@ -448,6 +585,21 @@ function dayStats(D, i){
     if(w!==null) code.push(w);
     per.push({id:m.id, tmax:a, tmin:b, prec:c, gust:g, code:w});
   }
+  /* oltre la copertura dei modelli deterministici (di solito 7 giorni)
+     resto comunque con i valori del modello di riferimento */
+  if(!per.length){
+    const b = D.base.daily;
+    const a=num(b.temperature_2m_max?.[i]), bb=num(b.temperature_2m_min?.[i]),
+          c=num(b.precipitation_sum?.[i]), g=num(b.wind_gusts_10m_max?.[i]),
+          s=num(b.snowfall_sum?.[i]), w=num(b.weather_code?.[i]);
+    if(a!==null) tmax.push(a);
+    if(bb!==null) tmin.push(bb);
+    if(c!==null) prec.push(c);
+    if(g!==null) gust.push(g);
+    if(s!==null) snow.push(s);
+    if(w!==null) code.push(w);
+  }
+
   const wetN = prec.filter(v=>v>=0.6).length;
   const wetFrac = prec.length ? wetN/prec.length : 0;
   /* punteggio di accordo: dispersione termica + spaccatura sul "piove / non piove" */
@@ -577,8 +729,16 @@ function buildAlerts(D){
   const names = ['oggi','domani','dopodomani'];
   for(let i=0;i<Math.min(4,D.base.daily.time.length);i++){
     const s = dayStats(D,i);
+    const q = D.ens ? ensDay(D.ens, D.base.daily.time[i]) : null;
     const when = names[i] || new Date(D.base.daily.time[i]).toLocaleDateString('it-IT',{weekday:'long'});
-    const agree = s.wetTot ? ` (${s.wetN}/${s.wetTot} modelli)` : '';
+    const agree = q ? ` (${q.pPioggia}% di probabilità)`
+                    : (s.wetTot ? ` (${s.wetN}/${s.wetTot} modelli)` : '');
+    /* con l'ensemble segnalo anche il rischio di forte pioggia quando la
+       media resta bassa ma una fetta di simulazioni va oltre soglia */
+    if(q && q.pForte >= 30 && (s.prec==null || s.prec < 25)){
+      out.push(['w','🌧️','Possibile pioggia forte '+when,
+        `Il ${q.pForte}% delle simulazioni supera i 10 mm. Il valore centrale resta basso, ma il rischio c'è.`]);
+    }
     if(s.gust!=null && s.gust>=80) out.push(['d','💨','Vento molto forte '+when, `Raffiche fino a ${r0(s.gust)} km/h. Attenzione a ponteggi, teli, materiale leggero in quota.`]);
     else if(s.gust!=null && s.gust>=60) out.push(['w','💨','Vento forte '+when, `Raffiche fino a ${r0(s.gust)} km/h.`]);
     if(s.prec!=null && s.prec>=50) out.push(['d','🌧️','Pioggia molto intensa '+when, `Media dei modelli ${r0(s.prec)} mm, punta a ${r0(s.precMax)} mm${agree}.`]);
@@ -587,7 +747,14 @@ function buildAlerts(D){
     else if(s.tmax!=null && s.tmax>=34) out.push(['w','🔥','Caldo intenso '+when, `Massima media ${r0(s.tmax)}°C.`]);
     if(s.tmin!=null && s.tmin<=0) out.push(['w','🧊','Gelo '+when, `Minima media ${r1(s.tmin)}°C.`]);
     if(s.snow!=null && s.snow>=1) out.push(['w','❄️','Neve '+when, `Accumulo medio previsto ${r1(s.snow)} cm.`]);
-    if(i<=1 && s.score<45 && s.n>=3) out.push(['i','❓','Previsione poco affidabile '+when, `I modelli sono in disaccordo (escursione ${r1(s.tmaxMin)}–${r1(s.tmaxMax)}°C, pioggia ${r1(s.precMin)}–${r1(s.precMax)} mm). Ricontrolla più avanti.`]);
+    if(i<=1){
+      if(q && q.banda > 5)
+        out.push(['i','❓','Previsione poco affidabile '+when,
+          `Le simulazioni si sparpagliano su ${r1(q.banda)}°C (massima fra ${r0(q.tmaxP10)}° e ${r0(q.tmaxP90)}°). Ricontrolla più avanti.`]);
+      else if(!q && s.score<45 && s.n>=3)
+        out.push(['i','❓','Previsione poco affidabile '+when,
+          `I modelli sono in disaccordo (escursione ${r1(s.tmaxMin)}–${r1(s.tmaxMax)}°C, pioggia ${r1(s.precMin)}–${r1(s.precMax)} mm). Ricontrolla più avanti.`]);
+    }
   }
   return out.slice(0,5);
 }
@@ -637,6 +804,10 @@ function render(D){
   }
   ac.appendChild(el('div','srcnote','Soglie calcolate sul consenso dei modelli. Per le <b>allerte ufficiali</b> consulta la Protezione Civile o l\'ARPA della tua regione (link in fondo).'));
   app.appendChild(ac);
+
+  /* ---- NOWCAST 15 MINUTI ---- */
+  const c15 = min15Card(D);
+  if(c15) app.appendChild(c15);
 
   /* ---- ORA PER ORA (48 h) ---- */
   const hrows = hourRows(D, 48);
@@ -696,55 +867,43 @@ function render(D){
   }
   app.appendChild(rc);
 
-  /* ---- 7 GIORNI ---- */
+  /* ---- GIORNI ---- */
+  const E = D.ens;
+  const nGiorni = D.base.daily.time.length;
   const dc = el('div','card');
-  dc.appendChild(el('div','ttl','<span>7 giorni</span><span class="sp"></span><b>tocca per il dettaglio</b>'));
+  dc.appendChild(el('div','ttl',
+    `<span>${Math.min(7,nGiorni)} giorni</span><span class="sp"></span><b>${E ? 'probabilità su '+E.membri+' simulazioni' : 'tocca per il dettaglio'}</b>`));
+
+  /* scala comune delle barre: con l'ensemble uso la banda, non il singolo valore */
   const allT = [];
-  for(let i=0;i<D.base.daily.time.length;i++){
-    const s = dayStats(D,i);
-    if(s.tmin!=null) allT.push(s.tmin);
-    if(s.tmax!=null) allT.push(s.tmax);
+  for(let i=0;i<nGiorni;i++){
+    const s = dayStats(D,i), q = E ? ensDay(E, D.base.daily.time[i]) : null;
+    const lo_ = q ? q.tminP10 : s.tmin, hi_ = q ? q.tmaxP90 : s.tmax;
+    if(lo_!=null) allT.push(lo_);
+    if(hi_!=null) allT.push(hi_);
   }
   const lo = Math.min(...allT), hi = Math.max(...allT), rng = Math.max(1, hi-lo);
 
-  for(let i=0;i<D.base.daily.time.length;i++){
-    const s = dayStats(D,i);
-    const dt = new Date(D.base.daily.time[i]);
-    const code = s.code!=null ? s.code : D.base.daily.weather_code[i];
-    const dn = i===0 ? 'Oggi' : i===1 ? 'Domani' : dt.toLocaleDateString('it-IT',{weekday:'short'}).replace('.','');
-    const left  = ((s.tmin-lo)/rng)*100;
-    const width = Math.max(6,((s.tmax-s.tmin)/rng)*100);
-
-    const d = el('div','day');
-    d.innerHTML = `
-      <div class="dn">${dn}<small>${dt.toLocaleDateString('it-IT',{day:'numeric',month:'short'}).replace('.','')}</small></div>
-      <div class="ic">${wmoIco(code,1)}</div>
-      <div class="mid">
-        <div class="bar"><i style="left:${left}%;width:${width}%"></i></div>
-        <div class="rain">${consDot(s.score)}${s.prec>=0.4 ? `<span title="${s.wetN} modelli su ${s.wetTot} danno pioggia">💧 ${r1(s.prec)} mm · ${s.wetN}/${s.wetTot}</span>` : ''}</div>
-      </div>
-      <div class="tt"><span>${r0(s.tmin)}°</span> <b>${r0(s.tmax)}°</b></div>`;
-
-    const x = el('div','dayx');
-    x.innerHTML = `
-      <div style="margin-bottom:8px">${consBadge(s.score)} <span style="font-size:11.5px;color:var(--tx3)">su ${s.n} modelli</span></div>
-      <div class="r"><span>Condizioni prevalenti</span><span>${wmoTxt(code)}</span></div>
-      <div class="r"><span>Massima — intervallo tra i modelli</span><span>${r1(s.tmaxMin)}° – ${r1(s.tmaxMax)}°</span></div>
-      <div class="r"><span>Pioggia — intervallo</span><span>${r1(s.precMin)} – ${r1(s.precMax)} mm</span></div>
-      <div class="r"><span>Raffica massima prevista</span><span>${r0(s.gust)} km/h</span></div>
-      <div class="r"><span>Vento dominante</span><span>${dirTxt(D.base.daily.wind_direction_10m_dominant?.[i])}</span></div>
-      <div class="r"><span>UV massimo</span><span>${r1(num(D.base.daily.uv_index_max?.[i]))}</span></div>
-      <div class="r"><span>Alba / tramonto</span><span>${hm(D.base.daily.sunrise?.[i])} – ${hm(D.base.daily.sunset?.[i])}</span></div>
-      <div class="r"><span>Ore di sole previste</span><span>${hhmm(num(D.base.daily.sunshine_duration?.[i]))}</span></div>
-      <div class="mods">${s.per.map(v=>{
-        const M = MODELS.find(m=>m.id===v.id)||{n:v.id,f:''};
-        return `<em>${M.f} ${M.n} ${r0(v.tmax)}° · ${r1(v.prec)}mm</em>`;
-      }).join('')}</div>`;
-
-    d.onclick = () => d.classList.toggle('open');
-    dc.appendChild(d); dc.appendChild(x);
+  for(let i=0;i<Math.min(7,nGiorni);i++){
+    dc.appendChild(rigaGiorno(D, i, lo, rng, false));
+    dc.appendChild(dettaglioGiorno(D, i));
   }
   app.appendChild(dc);
+
+  /* ---- TENDENZA 8-14 GIORNI ----
+     Oltre la settimana i numeri esatti non valgono niente: mostro solo
+     la fascia probabile e la probabilità di pioggia, senza fingere
+     precisione che non c'è. */
+  if(nGiorni > 7){
+    const tc2 = el('div','card');
+    tc2.appendChild(el('div','ttl',
+      `<span>Tendenza — da 8 a ${nGiorni} giorni</span><span class="sp"></span><b>${E ? 'fascia probabile' : 'indicativa'}</b>`));
+    for(let i=7;i<nGiorni;i++) tc2.appendChild(rigaGiorno(D, i, lo, rng, true));
+    tc2.appendChild(el('div','srcnote', E
+      ? 'Qui non trovi numeri esatti di proposito: a più di una settimana nessun modello ci azzecca. Quello che ha senso è la <b>fascia</b> — dove starà probabilmente la massima — e la probabilità che piova. Se la fascia è larga, significa che è ancora tutto da vedere.'
+      : 'Valori indicativi di un singolo modello. Le fasce probabili compaiono quando finisce di caricare l\'ensemble.'));
+    app.appendChild(tc2);
+  }
 
   /* ---- TABELLA MODELLI ---- */
   const tc = el('div','card');
@@ -784,7 +943,49 @@ function render(D){
 
   /* ---- aggiornato ---- */
   app.appendChild(el('div','foot',
-    `Aggiornato alle ${new Date(D.at).toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'})} · ${D.models.length} modelli`));
+    `Aggiornato alle ${new Date(D.at).toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'})} · ${D.models.length} modelli` +
+    (D.ens ? ` · ${D.ens.membri} simulazioni (${D.ensModelli.join(', ')})`
+           : D.ensFail ? ` · <span style="opacity:.7">probabilità non disponibili adesso</span>`
+           : ` · <span style="opacity:.7">probabilità in arrivo…</span>`)));
+}
+
+/* =========================================================
+   NOWCAST A 15 MINUTI
+   ========================================================= */
+function min15Card(D){
+  const m = D.base.minutely_15;
+  if(!m || !Array.isArray(m.time)) return null;
+  const now = new Date();
+  let s = m.time.findIndex(t => new Date(t) >= new Date(now.getTime()-8*60000));
+  if(s < 0) return null;
+  const rows = [];
+  for(let i=s; i<Math.min(s+12, m.time.length); i++){
+    const v = num(m.precipitation?.[i]);
+    rows.push({t:new Date(m.time[i]), mm:v, code:num(m.weather_code?.[i])});
+  }
+  if(rows.length < 4 || rows.every(r => r.mm === null)) return null;
+
+  const tot = rows.reduce((a,r)=>a+(r.mm||0), 0);
+  const first = rows.find(r => (r.mm||0) >= 0.05);
+  const max = Math.max(0.4, ...rows.map(r=>r.mm||0));
+
+  const c = el('div','card');
+  c.appendChild(el('div','ttl','<span>Prossime 3 ore</span><span class="sp"></span><b>ogni 15 minuti</b>'));
+  const row = el('div','m15');
+  for(const r of rows){
+    const h = Math.round(clamp((r.mm||0)/max,0,1)*40);
+    row.appendChild(el('div','m15b',
+      `<div class="v">${(r.mm||0)>=.05 ? r1(r.mm) : ''}</div>
+       <div class="b${(r.mm||0)<.02?' z':''}" style="height:${Math.max(h,3)}px"></div>
+       <div class="h">${r.t.toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'})}</div>`));
+  }
+  c.appendChild(row);
+  c.appendChild(el('div','rainsum', first
+    ? `Prima pioggia attesa verso le <b>${first.t.toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'})}</b> — circa <b>${r1(tot)} mm</b> in tre ore.`
+    : `<b>Asciutto</b> nelle prossime tre ore.`));
+  c.appendChild(el('div','srcnote',
+    'Dettaglio al quarto d\'ora. Sul nord e centro Italia arriva dai modelli ad alta risoluzione ICON-D2 e AROME, a 2 km di maglia.'));
+  return c;
 }
 
 /* =========================================================
@@ -828,7 +1029,9 @@ function timelineCard(D, rows){
     }
     const isNow = it === rows[0];
     const h = Math.round(clamp((it.mm||0)/maxmm,0,1)*22);
-    const agree = it.tot ? it.wet/it.tot : 0;
+    /* se ho l'ensemble, la barretta dell'accordo diventa la probabilità vera */
+    const eh = D.ens && D.ens.hour.get(it.t);
+    const agree = (eh && eh.tot) ? eh.wet/eh.tot : (it.tot ? it.wet/it.tot : 0);
     const acol = agree===0 ? 'transparent' : agree>=.75 ? 'var(--rain)' : agree>=.4 ? '#3f7fc0' : '#2c4d73';
     strip.appendChild(el('div','hr'+(isNow?' now':''),
       `<div class="hh">${isNow ? 'ora' : String(it.h).padStart(2,'0')}</div>
@@ -875,6 +1078,97 @@ function sunMoonCard(D){
   c.appendChild(el('div','srcnote',
     'Le "ore di sole" sono le ore con sole diretto previste dai modelli, sul totale di ore di luce del giorno.'));
   return c;
+}
+
+/* =========================================================
+   RIGA DI UN GIORNO
+   Con l'ensemble la barra diventa una fascia: la parte piena è dove
+   sta il grosso delle simulazioni, le code chiare sono gli estremi.
+   ========================================================= */
+function rigaGiorno(D, i, lo, rng, tendenza){
+  const s  = dayStats(D, i);
+  const q  = D.ens ? ensDay(D.ens, D.base.daily.time[i]) : null;
+  const dt = new Date(D.base.daily.time[i]);
+  const code = s.code != null ? s.code : D.base.daily.weather_code[i];
+  const dn = i===0 ? 'Oggi' : i===1 ? 'Domani'
+           : dt.toLocaleDateString('it-IT',{weekday:'short'}).replace('.','');
+
+  const tmin = q ? q.tminP50 : s.tmin;
+  const tmax = q ? q.tmaxP50 : s.tmax;
+  const p    = v => ((v - lo) / rng) * 100;
+
+  let barra;
+  if(q){
+    const e0 = p(q.tminP10), e1 = p(q.tmaxP90);
+    const c0 = p(q.tminP50), c1 = p(q.tmaxP50);
+    barra = `<div class="bar">
+        <u style="left:${e0}%;width:${Math.max(4,e1-e0)}%"></u>
+        <i style="left:${c0}%;width:${Math.max(4,c1-c0)}%"></i>
+      </div>`;
+  } else {
+    barra = `<div class="bar"><i style="left:${p(s.tmin)}%;width:${Math.max(6,p(s.tmax)-p(s.tmin))}%"></i></div>`;
+  }
+
+  let sotto;
+  if(q){
+    const aff = affidabilita(q.banda);
+    sotto = `<span class="cdot ${aff.c}" title="larghezza della fascia: ${r1(q.banda)}°"><i></i>${aff.t}</span>` +
+      (q.pPioggia >= 10
+        ? `<span title="${q.pPioggia}% delle simulazioni supera 0,5 mm">💧 ${q.pPioggia}%${(!tendenza && q.precP50>=1)?` · ${r1(q.precP50)} mm`:''}</span>`
+        : '');
+  } else {
+    sotto = consDot(s.score) + (s.prec>=0.4
+      ? `<span title="${s.wetN} modelli su ${s.wetTot} danno pioggia">💧 ${r1(s.prec)} mm · ${s.wetN}/${s.wetTot}</span>` : '');
+  }
+
+  const d = el('div','day' + (tendenza?' trend':''));
+  d.innerHTML = `
+    <div class="dn">${dn}<small>${dt.toLocaleDateString('it-IT',{day:'numeric',month:'short'}).replace('.','')}</small></div>
+    <div class="ic">${wmoIco(code,1)}</div>
+    <div class="mid">
+      ${barra}
+      <div class="rain">${sotto}</div>
+    </div>
+    <div class="tt">${
+      tendenza && q
+        ? `<span class="fascia">${r0(q.tmaxP10)}–${r0(q.tmaxP90)}°</span>`
+        : `<span>${r0(tmin)}°</span> <b>${r0(tmax)}°</b>`
+    }</div>`;
+  if(!tendenza) d.onclick = () => d.classList.toggle('open');
+  return d;
+}
+
+function dettaglioGiorno(D, i){
+  const s = dayStats(D, i);
+  const q = D.ens ? ensDay(D.ens, D.base.daily.time[i]) : null;
+  const code = s.code != null ? s.code : D.base.daily.weather_code[i];
+  const x = el('div','dayx');
+
+  const testa = q
+    ? `<div style="margin-bottom:9px">
+         <span class="cons ${affidabilita(q.banda).c}"><i></i>Fascia ${r1(q.banda)}° su ${q.n} simulazioni</span>
+       </div>
+       <div class="r"><span>Massima — fascia probabile</span><span>${r1(q.tmaxP10)}° – ${r1(q.tmaxP90)}°</span></div>
+       <div class="r"><span>Minima — fascia probabile</span><span>${r1(q.tminP10)}° – ${r1(q.tminP90)}°</span></div>
+       <div class="r"><span>Probabilità di pioggia</span><span>${q.pPioggia}%</span></div>
+       <div class="r"><span>Probabilità oltre 10 mm</span><span>${q.pForte}%</span></div>
+       <div class="r"><span>Pioggia — valore centrale</span><span>${r1(q.precP50)} mm</span></div>`
+    : `<div style="margin-bottom:8px">${consBadge(s.score)} <span style="font-size:11.5px;color:var(--tx3)">su ${s.n} modelli</span></div>
+       <div class="r"><span>Massima — intervallo tra i modelli</span><span>${r1(s.tmaxMin)}° – ${r1(s.tmaxMax)}°</span></div>
+       <div class="r"><span>Pioggia — intervallo</span><span>${r1(s.precMin)} – ${r1(s.precMax)} mm</span></div>`;
+
+  x.innerHTML = testa + `
+    <div class="r"><span>Condizioni prevalenti</span><span>${wmoTxt(code)}</span></div>
+    <div class="r"><span>Raffica massima prevista</span><span>${r0(s.gust)} km/h</span></div>
+    <div class="r"><span>Vento dominante</span><span>${dirTxt(D.base.daily.wind_direction_10m_dominant?.[i])}</span></div>
+    <div class="r"><span>UV massimo</span><span>${r1(num(D.base.daily.uv_index_max?.[i]))}</span></div>
+    <div class="r"><span>Alba / tramonto</span><span>${hm(D.base.daily.sunrise?.[i])} – ${hm(D.base.daily.sunset?.[i])}</span></div>
+    <div class="r"><span>Ore di sole previste</span><span>${hhmm(num(D.base.daily.sunshine_duration?.[i]))}</span></div>
+    <div class="mods">${s.per.map(v=>{
+      const M = MODELS.find(m=>m.id===v.id)||{n:v.id,f:''};
+      return `<em>${M.f} ${M.n} ${r0(v.tmax)}° · ${r1(v.prec)}mm</em>`;
+    }).join('')}</div>`;
+  return x;
 }
 
 function dirTxt(deg){
@@ -1043,20 +1337,42 @@ async function go(force){
   const key = `${p.lat.toFixed(3)},${p.lon.toFixed(3)}|${picked.join(',')}`;
   const cached = store.get(LS.cache, null);
   if(!force && cached && cached.key===key && Date.now()-cached.at < 12*60*1000){
-    DATA = cached.d; DATA.at = cached.at;
-    try{ render(DATA); }catch(e){ console.error(e); }
+    const d = cached.d; d.at = cached.at;
+    DATA = d;
+    try{ render(d); }catch(e){ console.error(e); }
     busy = false;
+    /* i dati salvati non contengono le simulazioni (sono troppe per
+       tenerle in memoria): le riprendo comunque, altrimenti riaprendo
+       l'app entro pochi minuti le probabilità sparirebbero */
+    loadEnsemble(p).then(list => {
+      if(DATA !== d) return;
+      if(!list.length){ d.ensFail = true; }
+      else { d.ens = ensembleStats(list); d.ensModelli = list.map(e => e.n); }
+      try{ render(d); }catch(e){ console.error(e); }
+    }).catch(()=>{ if(DATA === d){ d.ensFail = true; try{ render(d); }catch(e){} } });
     return;
   }
   if(!DATA) $('#app').innerHTML = '<div class="load"><div class="spin"></div>Interrogo '+picked.length+' modelli meteo…</div>';
   $('#btnRef').textContent='…';
 
   try{
+    /* faccio partire subito anche l'ensemble, ma non lo aspetto:
+       la schermata si apre con i modelli normali e le probabilità
+       arrivano addosso qualche secondo dopo */
+    const attesa = loadEnsemble(p);
+
     const d = await loadAll(p);
     if(!d.base || !d.base.daily) throw new Error('Risposta incompleta');
     DATA = d;
     store.set(LS.cache, {key, at:d.at, d});
     render(DATA);
+
+    attesa.then(list => {
+      if(DATA !== d) return;
+      if(!list.length){ d.ensFail = true; }
+      else { d.ens = ensembleStats(list); d.ensModelli = list.map(e => e.n); }
+      try{ render(d); }catch(e){ console.error(e); }
+    }).catch(()=>{ if(DATA === d){ d.ensFail = true; try{ render(d); }catch(e){} } });
   }catch(err){
     if(cached && cached.d){
       DATA = cached.d; DATA.at = cached.at;
